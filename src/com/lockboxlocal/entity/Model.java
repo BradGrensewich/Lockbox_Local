@@ -1,5 +1,6 @@
 package com.lockboxlocal.entity;
 
+
 import javafx.util.Pair;
 
 import java.io.BufferedReader;
@@ -10,6 +11,10 @@ import java.nio.file.Paths;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.concurrent.locks.Lock;
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
+import java.util.Base64;
+
 
 public class Model {
 
@@ -92,6 +97,40 @@ public class Model {
 
     }
 
+    // ---- Simple field-level encryption (obfuscation) ----
+
+    private static final String ALGO = "AES";
+    private static final byte[] KEY_BYTES =
+        "lockbox-localkey".getBytes();
+
+
+    private String encrypt(String plainText) {
+        if (plainText == null) return null;
+        try {
+            Cipher cipher = Cipher.getInstance(ALGO);
+            SecretKeySpec key = new SecretKeySpec(KEY_BYTES, ALGO);
+            cipher.init(Cipher.ENCRYPT_MODE, key);
+            byte[] encrypted = cipher.doFinal(plainText.getBytes("UTF-8"));
+            return Base64.getEncoder().encodeToString(encrypted);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String decrypt(String cipherText) {
+        if (cipherText == null) return null;
+        try {
+            Cipher cipher = Cipher.getInstance(ALGO);
+            SecretKeySpec key = new SecretKeySpec(KEY_BYTES, ALGO);
+            cipher.init(Cipher.DECRYPT_MODE, key);
+            byte[] decoded = Base64.getDecoder().decode(cipherText);
+            return new String(cipher.doFinal(decoded), "UTF-8");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+
     /**
      * Inserts a lockbox into the database.
      * @param name Name of the lockbox to create.
@@ -109,7 +148,7 @@ public class Model {
                     "(?,?,?,?,?,?,?)");
 
             stmt.setString(1, name);
-            stmt.setString(2, contents);
+            stmt.setString(2, encrypt(contents));
             stmt.setInt(3, 1);
             stmt.setInt(4, 0);
             stmt.setNull(5, Types.INTEGER);
@@ -146,7 +185,8 @@ public class Model {
             if(rset.next()) {
 
                 String tempName = rset.getString("boxName");
-                String contents = rset.getString("content");
+                String contents = decrypt(rset.getString("content"));
+
                 int locked = rset.getInt("locked");
                 long relockTimestamp = rset.getLong("relockTimestamp");
                 Long unlockTimestamp = rset.getLong("unlockTimestamp");
@@ -183,7 +223,8 @@ public class Model {
                     "unlockTimestamp = ?" +
                     " where boxName = ?");
 
-            stmt.setString(1, lockbox.contents);
+            
+            stmt.setString(1, encrypt(lockbox.contents));
             stmt.setInt(2, lockbox.locked);
             stmt.setLong(3, lockbox.relockTimestamp);
 
@@ -240,7 +281,7 @@ public class Model {
                             "(?,?,?,?,?,?,?)");
 
                     stmt.setString(1, dataArr[0]);
-                    stmt.setString(2, dataArr[1]);
+                    stmt.setString(2, encrypt(dataArr[1]));
                     stmt.setInt(3, Integer.parseInt(dataArr[2]));
                     stmt.setInt(4, Integer.parseInt(dataArr[3]));
                     stmt.setInt(5, Integer.parseInt(dataArr[4]));
@@ -296,7 +337,7 @@ public class Model {
                 ArrayList<String> dataList = new ArrayList<String>();
 
                 dataList.add(rset.getString("boxName"));
-                dataList.add(rset.getString("content"));
+                dataList.add(decrypt(rset.getString("content")));
                 dataList.add(String.valueOf(rset.getInt("locked")));
                 dataList.add(String.valueOf(rset.getInt("relockTimestamp")));
                 dataList.add(String.valueOf(rset.getInt("unlockTimestamp")));
