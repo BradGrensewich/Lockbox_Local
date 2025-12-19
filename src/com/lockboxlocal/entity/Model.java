@@ -1,53 +1,96 @@
 package com.lockboxlocal.entity;
 
-
 import javafx.util.Pair;
-
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.SecureRandom;
 import java.sql.*;
 import java.util.ArrayList;
-import java.util.concurrent.locks.Lock;
-import javax.crypto.Cipher;
-import javax.crypto.spec.SecretKeySpec;
 import java.util.Base64;
-
 
 public class Model {
 
-    Connection conn = null;
+    private Connection conn = null;
+
+    // Encryption Constants
+    private static final String ALGO = "AES/GCM/NoPadding";
+    private static final int TAG_LENGTH_BIT = 128;
+    private static final int IV_LENGTH_BYTE = 12;
+    
+    // Should move to env in producition app
+    private static final byte[] KEY_BYTES = "lockbox-localkey".getBytes();
+
+    // ---- Secure GCM Encryption Methods ----
+
+    private String encrypt(String plainText) {
+        if (plainText == null) return null;
+        try {
+            // 1. Generate a unique IV for this specific encryption
+            byte[] iv = new byte[IV_LENGTH_BYTE];
+            new SecureRandom().nextBytes(iv);
+
+            Cipher cipher = Cipher.getInstance(ALGO);
+            SecretKeySpec key = new SecretKeySpec(KEY_BYTES, "AES");
+            cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH_BIT, iv));
+
+            byte[] encryptedText = cipher.doFinal(plainText.getBytes("UTF-8"));
+            byte[] combined = ByteBuffer.allocate(iv.length + encryptedText.length)
+                    .put(iv)
+                    .put(encryptedText)
+                    .array();
+
+            return Base64.getEncoder().encodeToString(combined);
+        } catch (Exception e) {
+            throw new RuntimeException("Encryption failed", e);
+        }
+    }
+
+    private String decrypt(String cipherText) {
+        if (cipherText == null) return null;
+        try {
+            byte[] combined = Base64.getDecoder().decode(cipherText);
+
+           
+            ByteBuffer bb = ByteBuffer.wrap(combined);
+            byte[] iv = new byte[IV_LENGTH_BYTE];
+            bb.get(iv);
+            byte[] actualCipher = new byte[bb.remaining()];
+            bb.get(actualCipher);
+
+            Cipher cipher = Cipher.getInstance(ALGO);
+            SecretKeySpec key = new SecretKeySpec(KEY_BYTES, "AES");
+            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH_BIT, iv));
+
+            return new String(cipher.doFinal(actualCipher), "UTF-8");
+        } catch (Exception e) {
+            // If the key is wrong or data was tampered with, GCM throws an AEADBadTagException
+            System.err.println("Decryption failed: Integrity check failed or wrong key.");
+            return "DECRYPTION_ERROR";
+        }
+    }
 
     /**
      * Retrieves and returns all boxes from the database.
      * @return A list of the boxes' names.
      */
     public ArrayList<String> getBoxes() {
-
-        ArrayList<String> result = new ArrayList<String>();
-
-        try {
-
-            Statement stmt = conn.createStatement();
-            ResultSet resultSet = stmt.executeQuery("select (boxName) from Boxes");
-
-            while(resultSet.next()) {
-
+        ArrayList<String> result = new ArrayList<>();
+        try (Statement stmt = conn.createStatement();
+             ResultSet resultSet = stmt.executeQuery("select (boxName) from Boxes")) {
+            while (resultSet.next()) {
                 result.add(resultSet.getString("boxName"));
-
             }
-
-            resultSet.close();
-            stmt.close();
-
-        } catch(Exception e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
-
         return result;
-
     }
 
     /**
@@ -55,18 +98,12 @@ public class Model {
      * @param boxName the box to delete from the database.
      */
     public void deleteBox(String boxName) {
-
-        try {
-
-            PreparedStatement stmt = conn.prepareStatement("delete from Boxes where boxName = ?");
+        try (PreparedStatement stmt = conn.prepareStatement("delete from Boxes where boxName = ?")) {
             stmt.setString(1, boxName);
             stmt.executeUpdate();
-            stmt.close();
-
         } catch (Exception e) {
             e.printStackTrace();
         }
-
     }
 
     /**
@@ -74,62 +111,16 @@ public class Model {
      * exists in the database. Returns false otherwise.
      */
     public boolean boxExists(String name) {
-
-        boolean result = false;
-
-        try {
-
-            PreparedStatement stmt = conn.prepareStatement("select * from Boxes where boxName = ?");
+        try (PreparedStatement stmt = conn.prepareStatement("select 1 from Boxes where boxName = ?")) {
             stmt.setString(1, name);
-
-            ResultSet rset = stmt.executeQuery();
-
-            result = rset.next();
-
-            rset.close();
-            stmt.close();
-
-        } catch(Exception e) {
+            try (ResultSet rset = stmt.executeQuery()) {
+                return rset.next();
+            }
+        } catch (Exception e) {
             e.printStackTrace();
-        }
-
-        return result;
-
-    }
-
-    // ---- Simple field-level encryption (obfuscation) ----
-
-    private static final String ALGO = "AES";
-    private static final byte[] KEY_BYTES =
-        "lockbox-localkey".getBytes();
-
-
-    private String encrypt(String plainText) {
-        if (plainText == null) return null;
-        try {
-            Cipher cipher = Cipher.getInstance(ALGO);
-            SecretKeySpec key = new SecretKeySpec(KEY_BYTES, ALGO);
-            cipher.init(Cipher.ENCRYPT_MODE, key);
-            byte[] encrypted = cipher.doFinal(plainText.getBytes("UTF-8"));
-            return Base64.getEncoder().encodeToString(encrypted);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            return false;
         }
     }
-
-    private String decrypt(String cipherText) {
-        if (cipherText == null) return null;
-        try {
-            Cipher cipher = Cipher.getInstance(ALGO);
-            SecretKeySpec key = new SecretKeySpec(KEY_BYTES, ALGO);
-            cipher.init(Cipher.DECRYPT_MODE, key);
-            byte[] decoded = Base64.getDecoder().decode(cipherText);
-            return new String(cipher.doFinal(decoded), "UTF-8");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
 
     /**
      * Inserts a lockbox into the database.
@@ -139,31 +130,20 @@ public class Model {
      * @param relockDelay The relock delay of this lockbox.
      */
     public void createBox(String name, String contents, int unlockDelay, int relockDelay) {
-
-        try {
-
-            PreparedStatement stmt = conn.prepareStatement("insert into Boxes " +
-                    "(boxName, content, locked, relockTimestamp, unlockTimestamp, unlockDelay, relockDelay)" +
-                    "values" +
-                    "(?,?,?,?,?,?,?)");
-
+        try (PreparedStatement stmt = conn.prepareStatement("insert into Boxes " +
+                "(boxName, content, locked, relockTimestamp, unlockTimestamp, unlockDelay, relockDelay) " +
+                "values (?,?,?,?,?,?,?)")) {
             stmt.setString(1, name);
             stmt.setString(2, encrypt(contents));
             stmt.setInt(3, 1);
             stmt.setInt(4, 0);
             stmt.setNull(5, Types.INTEGER);
-
             stmt.setInt(6, unlockDelay);
             stmt.setInt(7, relockDelay);
-
             stmt.executeUpdate();
-
-            stmt.close();
-
-        } catch(Exception e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
-
     }
 
     /**
@@ -172,40 +152,25 @@ public class Model {
      * @param name The name of the box to retrieve.
      */
     public Lockbox getBox(String name) {
-
-        Lockbox result = null;
-
-        try {
-
-            PreparedStatement stmt = conn.prepareStatement("select * from Boxes where boxName = ?");
+        try (PreparedStatement stmt = conn.prepareStatement("select * from Boxes where boxName = ?")) {
             stmt.setString(1, name);
-
-            ResultSet rset = stmt.executeQuery();
-
-            if(rset.next()) {
-
-                String tempName = rset.getString("boxName");
-                String contents = decrypt(rset.getString("content"));
-
-                int locked = rset.getInt("locked");
-                long relockTimestamp = rset.getLong("relockTimestamp");
-                Long unlockTimestamp = rset.getLong("unlockTimestamp");
-                long unlockDelay = rset.getLong("unlockDelay");
-                long relockDelay = rset.getLong("relockDelay");
-
-                result = new Lockbox(tempName, contents, locked, relockTimestamp, unlockTimestamp, unlockDelay, relockDelay);
-
+            try (ResultSet rset = stmt.executeQuery()) {
+                if (rset.next()) {
+                    return new Lockbox(
+                            rset.getString("boxName"),
+                            decrypt(rset.getString("content")),
+                            rset.getInt("locked"),
+                            rset.getLong("relockTimestamp"),
+                            rset.getLong("unlockTimestamp"),
+                            rset.getLong("unlockDelay"),
+                            rset.getLong("relockDelay")
+                    );
+                }
             }
-
-            rset.close();
-            stmt.close();
-
         } catch (Exception e) {
             e.printStackTrace();
         }
-
-        return result;
-
+        return null;
     }
 
     /**
@@ -213,38 +178,21 @@ public class Model {
      * @param lockbox the lockbox to update.
      */
     public void updateBox(Lockbox lockbox) {
-
-        try {
-
-            PreparedStatement stmt = conn.prepareStatement("update Boxes set " +
-                    "content = ?," +
-                    "locked = ?," +
-                    "relockTimestamp = ?," +
-                    "unlockTimestamp = ?" +
-                    " where boxName = ?");
-
-            
+        try (PreparedStatement stmt = conn.prepareStatement("update Boxes set " +
+                "content = ?, locked = ?, relockTimestamp = ?, unlockTimestamp = ? where boxName = ?")) {
             stmt.setString(1, encrypt(lockbox.contents));
             stmt.setInt(2, lockbox.locked);
             stmt.setLong(3, lockbox.relockTimestamp);
-
-            if(lockbox.unlockTimestamp == null) {
-                stmt.setNull(4, Types.INTEGER);
-            } else {
-                stmt.setLong(4, lockbox.unlockTimestamp);
-            }
-
+            if (lockbox.unlockTimestamp == null) stmt.setNull(4, Types.INTEGER);
+            else stmt.setLong(4, lockbox.unlockTimestamp);
             stmt.setString(5, lockbox.name);
-
             stmt.executeUpdate();
-
         } catch (Exception e) {
             e.printStackTrace();
         }
-
     }
 
-    /**
+     /**
      * Import the data from a .lbf file, inserting
      * its data into the model's database.
      * Returns the following pair:
@@ -365,8 +313,6 @@ public class Model {
 
     }
 
-
-
     public Model() {
 
         try {
@@ -392,5 +338,4 @@ public class Model {
         }
 
     }
-
 }
